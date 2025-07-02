@@ -3,6 +3,23 @@
 // Variables para manejar el retraso del ocultamiento
 let tooltipHideTimeout;
 const TOOLTIP_HIDE_DELAY = 300; // milisegundos para retrasar el ocultamiento
+const IGNORED_TAGS = [
+  "SCRIPT",
+  "STYLE",
+  "BUTTON",
+  "A",
+  "INPUT",
+  "TEXTAREA",
+  "SELECT",
+  "OPTION",
+  "IMG",
+  "SVG",
+  "CANVAS",
+  "VIDEO",
+  "AUDIO",
+  "IFRAME",
+];
+const INTERACTIVE_CLASSES = ["my-highvocab-tooltip", "my-highvocab-highlight"];
 
 // --- Funciones de utilidad ---
 
@@ -216,16 +233,29 @@ async function highlightMarkedWords() {
     document.body,
     NodeFilter.SHOW_TEXT,
     {
-      // Filtro para ignorar scripts, estilos y el propio tooltip de la extensión
       acceptNode: function (node) {
+        // 1. Ignorar elementos de script, estilo, o de tu propia extensión
         if (
           node.parentNode.nodeName === "SCRIPT" ||
           node.parentNode.nodeName === "STYLE" ||
           node.parentNode.id === "my-highvocab-tooltip" ||
-          node.parentNode.classList.contains("my-highvocab-highlight") // Evitar re-procesar texto ya resaltado
+          node.parentNode.classList.contains("my-highvocab-highlight")
         ) {
           return NodeFilter.FILTER_REJECT;
         }
+
+        // 2. Ignorar nodos de texto dentro de elementos interactivos (NUEVO)
+        const parentNode = node.parentNode;
+        if (
+          parentNode &&
+          (IGNORED_TAGS.includes(parentNode.nodeName) ||
+            parentNode.closest(
+              IGNORED_TAGS.map((tag) => tag.toLowerCase()).join(",")
+            ))
+        ) {
+          return NodeFilter.FILTER_REJECT;
+        }
+
         return NodeFilter.FILTER_ACCEPT;
       },
     },
@@ -408,15 +438,23 @@ document.addEventListener("mouseover", async (event) => {
   let targetElement = null;
 
   // 1. Ignorar si el mouse está sobre la propia extensión (tooltip o script/style tags)
+  const tagName = event.target.nodeName;
+  // Comprobar si el elemento o alguno de sus ancestros cercanos es un tag ignorado
   if (
-    event.target.nodeName === "SCRIPT" ||
-    event.target.nodeName === "STYLE" ||
-    event.target.id === "my-highvocab-tooltip" ||
-    event.target.closest("#my-highvocab-tooltip")
+    IGNORED_TAGS.includes(tagName) ||
+    event.target.closest(
+      IGNORED_TAGS.map((tag) => tag.toLowerCase()).join(",")
+    ) || // Comprueba si es descendiente de un tag ignorado
+    INTERACTIVE_CLASSES.some(
+      (cls) =>
+        event.target.classList.contains(cls) || event.target.closest(`.${cls}`)
+    ) // Comprueba si es parte de tu extensión
   ) {
-    // Si el mouse está sobre el tooltip, no queremos que se oculte por la lógica del document.mouseover
-    // Sin embargo, si salió de una palabra y entró al tooltip, el tooltip ya está abierto.
-    // Si está sobre el tooltip, simplemente salimos y dejamos que los listeners del tooltip lo manejen.
+    // Si el mouse está sobre un elemento no deseado, ocultar el tooltip si está visible
+    // y salir de la función.
+    if (tooltip.style.opacity === "1") {
+      startTooltipHideTimer(event.relatedTarget);
+    }
     return;
   }
 
@@ -424,6 +462,13 @@ document.addEventListener("mouseover", async (event) => {
   const selection = window.getSelection();
   if (selection.toString().length > 0) {
     wordToTranslate = selection.toString().trim();
+    // Validar que la selección no contenga solo espacios o caracteres especiales
+    if (!wordToTranslate.match(/^[a-zA-Z']+$/)) {
+      // Solo letras y apóstrofes
+      startTooltipHideTimer(event.relatedTarget);
+      return;
+    }
+
     if (selection.rangeCount > 0) {
       const range = selection.getRangeAt(0);
       targetElement =
@@ -435,25 +480,39 @@ document.addEventListener("mouseover", async (event) => {
     wordToTranslate = event.target.textContent.trim();
     targetElement = event.target;
 
-    // Si es una palabra resaltada, mostramos la traducción guardada directamente
     const storedTranslation =
       event.target.dataset.translation || "No traducción guardada.";
     tooltipTextSpan.textContent = storedTranslation;
 
     tooltip.dataset.currentWord =
       event.target.dataset.originalWord || wordToTranslate;
-    saveButtonInTooltip.style.display = "none"; // Ocultar botón "Guardar" para palabras ya guardadas
+    saveButtonInTooltip.style.display = "none";
 
-    // Posicionar y mostrar tooltip
     const rect = targetElement.getBoundingClientRect();
     tooltip.style.left = `${rect.left + window.scrollX}px`;
     tooltip.style.top = `${rect.bottom + window.scrollY + 5}px`;
     tooltip.style.opacity = "1";
-    return; // Salir, ya hemos manejado la palabra resaltada
+    return;
   }
   // 4. Prioridad 3: Si el mouse está sobre un elemento con una sola palabra o un nodo de texto
   else {
     // Intenta obtener la palabra si el mouse está sobre un nodo de texto o un elemento simple
+    // Asegúrate de que el padre del nodo de texto no es un elemento interactivo
+    let parentElement =
+      event.target.nodeType === Node.TEXT_NODE
+        ? event.target.parentElement
+        : event.target;
+    if (
+      parentElement &&
+      (IGNORED_TAGS.includes(parentElement.nodeName) ||
+        parentElement.closest(
+          IGNORED_TAGS.map((tag) => tag.toLowerCase()).join(",")
+        ))
+    ) {
+      startTooltipHideTimer(event.relatedTarget);
+      return;
+    }
+
     if (
       event.target.textContent &&
       event.target.textContent.trim().split(/\s+/).length === 1
@@ -478,7 +537,7 @@ document.addEventListener("mouseover", async (event) => {
         }
 
         wordToTranslate = textContent.substring(start, end).trim();
-        targetElement = textNode.parentElement;
+        targetElement = textNode.parentElement; // El elemento padre del nodo de texto
       }
     }
   }
@@ -490,22 +549,21 @@ document.addEventListener("mouseover", async (event) => {
     wordToTranslate.match(/^[a-zA-Z']+$/)
   ) {
     if (wordToTranslate.length > 50) return;
-    // Importante: si la palabra actual ya es la misma que la que se detectó, no hacer nada para evitar parpadeos.
     if (
       currentHoveredWord === wordToTranslate &&
       tooltip.style.opacity === "1" &&
       tooltipTextSpan.textContent !== "Traduciendo..." &&
       tooltipTextSpan.textContent !== "Obteniendo traducción..."
     ) {
-      return; // Ya está mostrando la palabra y no está en proceso de traducción
+      return;
     }
 
     currentHoveredWord = wordToTranslate;
     currentHoveredElement = targetElement;
 
-    tooltipTextSpan.textContent = "Click para traducir"; // Mostrar estado de carga
+    tooltipTextSpan.textContent = "Traduciendo...";
     tooltip.dataset.currentWord = wordToTranslate;
-    saveButtonInTooltip.style.display = "inline-block"; // Asegurarse de que el botón esté visible
+    saveButtonInTooltip.style.display = "inline-block";
 
     const rect = targetElement
       ? targetElement.getBoundingClientRect
@@ -516,14 +574,11 @@ document.addEventListener("mouseover", async (event) => {
       tooltip.style.left = `${rect.left + window.scrollX}px`;
       tooltip.style.top = `${rect.bottom + window.scrollY + 5}px`;
     } else {
-      // Fallback si no se puede obtener un rectángulo, usar posición del mouse
       tooltip.style.left = `${event.pageX + 10}px`;
       tooltip.style.top = `${event.pageY + 10}px`;
     }
     tooltip.style.opacity = "1";
   } else {
-    // Si no es una palabra válida, iniciar el temporizador para ocultar el tooltip
-    // Solo si el mouse no está sobre el tooltip.
     if (!tooltip.contains(event.relatedTarget)) {
       startTooltipHideTimer(event.relatedTarget);
     }
@@ -538,7 +593,10 @@ tooltip.addEventListener("click", async (event) => {
   }
 
   const wordToTranslate = tooltip.dataset.currentWord;
-  if (wordToTranslate && tooltipTextSpan.textContent === "Click para traducir") {
+  if (
+    wordToTranslate &&
+    tooltipTextSpan.textContent === "Click para traducir"
+  ) {
     // Solo traducir si no se ha traducido ya
     tooltipTextSpan.textContent = "Obteniendo traducción...";
     const translation = await translateWord(wordToTranslate);
