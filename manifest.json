@@ -8,6 +8,10 @@
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
+      "exclude_matches": [
+        "*://*.youtube.com/*",
+        "*://*.youtu.be/*"
+      ],
       "js": ["content.js"]
     }
   ],
